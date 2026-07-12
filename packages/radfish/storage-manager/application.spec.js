@@ -98,6 +98,35 @@ describe("Application storage-manager integration", () => {
     expect(snap.databases).toEqual(["catch-store", "radfish-app-logs"]);
   });
 
+  it("aggregates per-store bytes into stores / storesBytes / radfishBytes", async () => {
+    define("storage", { estimate: async () => ({ usage: 10, quota: 100 }), persisted: async () => false });
+    const app = new Application({ storageManager: {} });
+    await app._initializationPromise;
+
+    app.logger = { persistence: { usage: async () => 500, dbName: "radfish-app-logs" } };
+    app.stores = {
+      catchData: { connector: { dbName: "radfish-catch-data", usage: async () => 2000 } },
+      otherData: { connector: { dbName: "other-db", usage: async () => 300 } },
+    };
+
+    const snap = await app.getStorageEstimate();
+    expect(snap.logsBytes).toBe(500);
+    expect(snap.stores).toEqual({ "radfish-catch-data": 2000, "other-db": 300 });
+    expect(snap.storesBytes).toBe(2300);
+    expect(snap.radfishBytes).toBe(2800); // 500 logs + 2300 stores
+  });
+
+  it("handles no stores / no logger (storesBytes 0, radfishBytes = logs only)", async () => {
+    define("storage", { estimate: async () => ({ usage: 10, quota: 100 }), persisted: async () => false });
+    const app = new Application({ storageManager: {} });
+    await app._initializationPromise;
+
+    const snap = await app.getStorageEstimate();
+    expect(snap.stores).toEqual({});
+    expect(snap.storesBytes).toBe(0);
+    expect(snap.radfishBytes).toBe(0); // no logger, no stores
+  });
+
   it("requestPersistence() updates the cached snapshot", async () => {
     define("storage", {
       estimate: async () => ({ usage: 10, quota: 100 }),

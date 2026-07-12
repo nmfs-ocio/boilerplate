@@ -208,6 +208,27 @@ export class Application {
     snapshot.logsBytes = this.logger?.persistence?.usage
       ? await this.logger.persistence.usage()
       : null;
+
+    // Per-subsystem byte usage. RADFish measures these itself because the browser
+    // gives no per-database breakdown cross-browser (see IndexedDBConnector.usage
+    // and the logger sink). `stores` = per data-store bytes; `storesBytes` = their
+    // total; `radfishBytes` = logger + stores (all RADFish-managed storage).
+    const stores = {};
+    let storesBytes = 0;
+    for (const [name, store] of Object.entries(this.stores ?? {})) {
+      if (typeof store?.connector?.usage !== "function") continue;
+      try {
+        const bytes = await store.connector.usage();
+        stores[store.connector.dbName ?? name] = bytes;
+        storesBytes += bytes;
+      } catch {
+        // a store that can't be measured shouldn't break the estimate
+      }
+    }
+    snapshot.stores = stores;
+    snapshot.storesBytes = storesBytes;
+    snapshot.radfishBytes = (snapshot.logsBytes ?? 0) + storesBytes;
+
     snapshot.databases = this.storageDatabases();
 
     // Testing/demo: pretend the quota is a set size so warnAt/criticalAt are
