@@ -54,7 +54,7 @@ export class Application {
    *     },
    *   });
    *
-   * Access it anywhere via `app.logger` (or the `useLogger()` hook in React).
+   * Access it anywhere via `app.logger` (in React: `useApplication().logger`).
    * @private
    */
   _createLogger(config) {

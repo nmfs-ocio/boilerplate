@@ -58,21 +58,3 @@ export const useApplication = () => {
   return application;
 };
 
-/**
- * Access the app-wide Logger from any component inside <Application>.
- * Mirrors useApplication(); returns the `logger` instance the Application was
- * configured with.
- *
- *   const logger = useLogger();
- *   logger.stream("app").info("user clicked save", { id });
- */
-export const useLogger = () => {
-  const application = useApplication();
-  if (!application.logger) {
-    throw new Error(
-      "useLogger requires a configured logger. Pass a `logger` block to your Application, e.g. " +
-        "new Application({ logger: { streams: { app: { level: 'info' } } } })",
-    );
-  }
-  return application.logger;
-};
