@@ -171,6 +171,7 @@ export function createIndexedDBSink({ dbName = "radfish-logs", maxSize = DEFAULT
 
   return {
     dbName,
+    maxBytes, // the logs storage budget in bytes (parsed from maxSize)
     // --- Logger sink contract ---
     write: async (record) => {
       if (!hasIDB()) return;
@@ -182,6 +183,16 @@ export function createIndexedDBSink({ dbName = "radfish-logs", maxSize = DEFAULT
         await clearStore(await db(), LOGS);
         resetStats(LOGS);
       }
+    },
+    // Accounted bytes currently stored in the logs store. Uses the sink's own
+    // running byte counter (seeding it once from disk if needed), so it reports
+    // logs usage on every browser — unlike navigator.storage, which can't break
+    // usage down per-database outside Chromium.
+    usage: async () => {
+      if (!hasIDB()) return 0;
+      const database = await db();
+      await seed(database, LOGS);
+      return stats[LOGS].bytes;
     },
     // --- persistence helpers (for hydration / clearing from the app) ---
     loadLogs: async () => (hasIDB() ? getAllFrom(await db(), LOGS) : []),

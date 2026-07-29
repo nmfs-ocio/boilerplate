@@ -356,12 +356,32 @@ class IndexedDBConnector extends Connector {
   async addCollection(schema) {
     // Add the schema to the engine (this now returns a Promise)
     await this.engine.addSchema(schema.name, schema);
-    
+
     // Call the parent method to register the collection
     super.addCollection(schema);
-    
+
     // Return the created collection
     return this.collections[schema.name];
+  }
+
+  /**
+   * Total bytes currently stored in this connector's database, measured by
+   * summing the serialized (UTF-8 JSON) size of every record across all tables.
+   * RADFish measures this itself because the browser provides no per-database
+   * byte breakdown cross-browser. On-demand: reads all records, so it is O(n)
+   * in the number of records — call it when you need a number, not in a tight loop.
+   * @returns {Promise<number>}
+   */
+  async usage() {
+    const db = this.engine?.db;
+    if (!db) return 0;
+    const encoder = new TextEncoder();
+    let total = 0;
+    for (const table of db.tables) {
+      const rows = await table.toArray();
+      for (const row of rows) total += encoder.encode(JSON.stringify(row)).length;
+    }
+    return total;
   }
 }
 
