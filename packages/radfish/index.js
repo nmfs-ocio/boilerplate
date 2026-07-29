@@ -1,5 +1,7 @@
 import { Store, Schema, LocalStorageConnector, IndexedDBConnector } from './storage/index.js';
 import { StorageMethod, IndexedDBMethod, LocalStorageMethod } from "./on-device-storage/storage/index.js";
+import { Logger } from "./logger/Logger.js";
+import { createIndexedDBSink } from "./logger/indexedDBSink.js";
 
 const registerServiceWorker = async (url) => {
   if ("serviceWorker" in navigator) {
@@ -29,11 +31,58 @@ export class Application {
     this._options = options;
     this._initializationPromise = null;
 
+    // Build the logger synchronously so `app.logger` is available immediately.
+    this.logger = this._createLogger(options.logger);
+
     // Register event listeners
     this._registerEventListeners();
 
     // Initialize everything
     this._initializationPromise = this._initialize();
+  }
+
+  /**
+   * Build the app-wide Logger from the `logger` config block. Returns null when
+   * no logger config is provided. Sinks are assembled by the framework so the
+   * developer only declares stream levels + an optional IndexedDB config:
+   *
+   *   new Application({
+   *     logger: {
+   *       streams: { app: { level: "info" }, system: { level: "warn" } },
+   *       indexedDB: { dbName: "my-app-logs", maxSize: "5MB" }, // optional persistence
+   *       middleware: [ enrichFn, redactFn ],                    // optional
+   *     },
+   *   });
+   *
+   * Access it anywhere via `app.logger` (in React: `useApplication().logger`).
+   * @private
+   */
+  _createLogger(config) {
+    if (!config) return null;
+
+    const baseSinks = [{ type: "console" }];
+    let persistence = null;
+    if (config.indexedDB) {
+      persistence = createIndexedDBSink({
+        dbName: config.indexedDB.dbName,
+        maxSize: config.indexedDB.maxSize,
+      });
+      baseSinks.push(persistence);
+    }
+
+    const streams = {};
+    for (const [name, def] of Object.entries(config.streams || {})) {
+      streams[name] = {
+        level: def.level || "info",
+        // framework-provided sinks (console [+ IndexedDB]) plus any the dev adds
+        sinks: [...baseSinks, ...(def.sinks || [])],
+      };
+    }
+
+    const logger = new Logger({ streams, middleware: config.middleware });
+    // expose persistence helpers (loadLogs/clearLogs/...) for hydration; null if no IndexedDB
+    logger.persistence = persistence;
+    return logger;
   }
 
   /**
