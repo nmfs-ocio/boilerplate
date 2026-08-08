@@ -196,10 +196,15 @@ export class Application {
     const config = this._options.storageManager || {};
     try {
       // Request persistence fire-and-forget — persist() can prompt (Firefox), so
-      // we must not block init/ready on it. The cached snapshot's `persisted` is
-      // patched when it resolves.
+      // we must not block init/ready on it. Once the grant resolves we re-run
+      // getStorageEstimate() so the cached snapshot's `persisted` reflects the
+      // post-grant state (the initial snapshot below may read persisted() before
+      // the grant lands, and requestPersistence()'s own patch is skipped while
+      // this.storageEstimate is still null).
       if (config.persist) {
-        this.requestPersistence().catch(() => {});
+        this.requestPersistence()
+          .then(() => this.getStorageEstimate())
+          .catch(() => {});
       }
       // getStorageEstimate() captures the snapshot and emits storage:pressure if
       // we're already under pressure at startup.
@@ -235,6 +240,12 @@ export class Application {
       if (typeof store?.connector?.usage !== "function") continue;
       try {
         const bytes = await store.connector.usage();
+        // null = "not measurable right now" (e.g. mid schema-change) — skip it
+        // rather than counting it as 0, which would under-report the total.
+        if (bytes == null) continue;
+        // Keyed by dbName when present (IndexedDB), else the store name (e.g.
+        // localStorage). storesBytes sums independently, so it stays correct even
+        // if two stores share a key.
         stores[store.connector.dbName ?? name] = bytes;
         storesBytes += bytes;
       } catch {
@@ -248,14 +259,19 @@ export class Application {
     snapshot.databases = this.storageDatabases();
 
     // Testing/demo: pretend the quota is a set size so warnAt/criticalAt are
-    // reachable without actually filling hundreds of GB. Recomputes derived fields.
+    // reachable without actually filling hundreds of GB. Derived fields are
+    // recomputed against RADFish's OWN usage (radfishBytes), not the origin-wide
+    // usageBytes — otherwise unrelated browser storage would dominate the
+    // simulated percent on a real browser and pin it to critical. `simulated`
+    // flags the snapshot so consumers/telemetry can tell it isn't a real reading.
     if (this._simulatedQuotaBytes != null && snapshot.supported) {
-      const config = this._options.storageManager || {};
       const quota = this._simulatedQuotaBytes;
+      const simUsage = snapshot.radfishBytes ?? 0;
       snapshot.quotaBytes = quota;
-      snapshot.remainingBytes = Math.max(0, quota - snapshot.usageBytes);
-      snapshot.percentUsed = quota > 0 ? snapshot.usageBytes / quota : null;
+      snapshot.remainingBytes = Math.max(0, quota - simUsage);
+      snapshot.percentUsed = quota > 0 ? simUsage / quota : null;
       snapshot.level = levelFor(snapshot.percentUsed, config.warnAt, config.criticalAt);
+      snapshot.simulated = true;
     }
 
     this._applyStorageSnapshot(snapshot);
@@ -263,16 +279,17 @@ export class Application {
   }
 
   /**
-   * Cache the snapshot and emit `storage:pressure` when the level rises into (or
-   * moves between) warning/critical — so listeners are notified as storage fills
-   * during a session, not only at init. No event when the level is unchanged or ok.
+   * Cache the snapshot and emit on any level change: `storage:pressure` when the
+   * level moves into/between warning/critical, and `storage:ok` when it returns
+   * to ok — so an event-driven UI can both raise AND clear a pressure banner. No
+   * event when the level is unchanged.
    * @private
    */
   _applyStorageSnapshot(snapshot) {
     const previousLevel = this.storageEstimate ? this.storageEstimate.level : "ok";
     this.storageEstimate = snapshot;
-    if (snapshot.level !== previousLevel && snapshot.level !== "ok") {
-      this._dispatch("storage:pressure", snapshot);
+    if (snapshot.level !== previousLevel) {
+      this._dispatch(snapshot.level === "ok" ? "storage:ok" : "storage:pressure", snapshot);
     }
   }
 
@@ -317,7 +334,9 @@ export class Application {
     }
     const logsDb = this.logger?.persistence?.dbName;
     if (logsDb) names.push(logsDb);
-    return names;
+    // Dedupe: a store dbName can coincide with the logs dbName; callers use this
+    // list to delete databases, so a name should appear at most once.
+    return [...new Set(names)];
   }
 
   get storage() {

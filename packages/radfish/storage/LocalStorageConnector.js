@@ -1,5 +1,6 @@
 import Connector from "./Connector.js";
 import Engine from "./Engine.js";
+import { byteSizeOfString } from "../utils/byteSize.js";
 
 /**
  * LocalStorageEngine - A storage engine that uses localStorage for persistence
@@ -158,6 +159,26 @@ class LocalStorageConnector extends Connector {
   constructor(namespace) {
     super(new LocalStorageEngine(namespace));
     this.namespace = namespace;
+  }
+
+  /**
+   * Total bytes this connector occupies in localStorage — the UTF-8 size of
+   * every key/value pair under this connector's `namespace:` prefix. Lets the
+   * Application include localStorage-backed stores in its storage totals (the
+   * browser gives no per-store breakdown).
+   * @returns {Promise<number>}
+   */
+  async usage() {
+    if (typeof localStorage === "undefined") return 0;
+    const prefix = `${this.namespace}:`;
+    let total = 0;
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(prefix)) {
+        total += byteSizeOfString(key) + byteSizeOfString(localStorage.getItem(key));
+      }
+    }
+    return total;
   }
 }
 

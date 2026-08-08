@@ -20,15 +20,14 @@
  * never collide.
  */
 
+// Serialized UTF-8 size of a record — what it actually costs on disk.
+import { byteSize } from "../utils/byteSize.js";
+
 const LOGS = "logs";
 const VERSION = 1;
 const DEFAULT_MAX_SIZE = "5MB";
 
 const hasIDB = () => typeof indexedDB !== "undefined";
-
-// Serialized UTF-8 size of a record — what it actually costs on disk.
-const encoder = new TextEncoder();
-const byteSize = (item) => encoder.encode(JSON.stringify(item)).length;
 
 // Parse a human-friendly size into bytes. Accepts a number (already bytes) or a
 // string like "5MB", "500 kb", "1.5gb". Binary units (1KB = 1024 bytes).

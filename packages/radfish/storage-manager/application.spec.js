@@ -51,28 +51,35 @@ describe("Application storage-manager integration", () => {
     expect(events[0].level).toBe("critical");
   });
 
-  it("re-emits storage:pressure when the level rises during a session", async () => {
+  it("emits storage:pressure when RADFish usage rises, and storage:ok on recovery", async () => {
     define("storage", { estimate: async () => ({ usage: 10, quota: 100 }), persisted: async () => false });
     const app = new Application({ storageManager: { warnAt: 0.8, criticalAt: 0.9 } });
-    const levels = [];
-    app.on("storage:pressure", (e) => levels.push(e.detail.level));
+    // Give the app measurable RADFish usage so the simulated quota is meaningful
+    // (simulation now measures radfishBytes against the fake quota, not origin usage).
+    app.logger = { persistence: { usage: async () => 10, dbName: "app-logs" } };
+    const pressure = [];
+    const oks = [];
+    app.on("storage:pressure", (e) => pressure.push(e.detail.level));
+    app.on("storage:ok", () => oks.push(true));
     await app._initializationPromise;
-    expect(levels).toEqual([]); // ok at init
+    await app.getStorageEstimate(); // baseline with logger attached
+    expect(pressure).toEqual([]); // radfishBytes(10) / real quota(100) = ok
 
-    // shrink the simulated quota so usage (10) is now 100% -> critical
+    // shrink the simulated quota so radfishBytes (10) is now 100% -> critical
     app.simulateQuota(10);
     await app.getStorageEstimate();
-    expect(levels).toEqual(["critical"]);
+    expect(pressure).toEqual(["critical"]);
+    expect(app.storageEstimate.simulated).toBe(true);
 
     // staying critical must not re-emit
     await app.getStorageEstimate();
-    expect(levels).toEqual(["critical"]);
+    expect(pressure).toEqual(["critical"]);
 
-    // clearing the simulation drops back to ok (no pressure event on recovery)
+    // clearing the simulation drops back to ok AND emits a recovery event
     app.simulateQuota(null);
     await app.getStorageEstimate();
-    expect(levels).toEqual(["critical"]);
     expect(app.storageEstimate.level).toBe("ok");
+    expect(oks).toEqual([true]);
   });
 
   it("does not emit storage:pressure when usage is fine", async () => {
@@ -140,6 +147,31 @@ describe("Application storage-manager integration", () => {
     const granted = await app.requestPersistence();
     expect(granted).toBe(true);
     expect(app.storageEstimate.persisted).toBe(true);
+  });
+
+  it("reflects a persistence grant in the cached snapshot at init (persist:true)", async () => {
+    // persisted() returns false until persist() is called, then true — models a
+    // grant that lands after the initial snapshot's persisted() read.
+    let persistedState = false;
+    define("storage", {
+      estimate: async () => ({ usage: 10, quota: 100 }),
+      persisted: async () => persistedState,
+      persist: async () => { persistedState = true; return true; },
+    });
+    const app = new Application({ storageManager: { persist: true } });
+    await app._initializationPromise;
+    // let the fire-and-forget requestPersistence().then(refresh) settle
+    await new Promise((r) => setTimeout(r, 10));
+    expect(app.storageEstimate.persisted).toBe(true);
+  });
+
+  it("storageDatabases() dedupes a store dbName that matches the logs db", async () => {
+    define("storage", undefined);
+    const app = new Application({});
+    await app._initializationPromise;
+    app.stores = { logsStore: { connector: { dbName: "radfish-logs" } } };
+    app.logger = { persistence: { dbName: "radfish-logs" } };
+    expect(app.storageDatabases()).toEqual(["radfish-logs"]); // not duplicated
   });
 
   it("getPersistenceStatus() returns the tri-state", async () => {
