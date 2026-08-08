@@ -66,35 +66,51 @@ export class Application {
    *     },
    *   });
    *
-   * Access it anywhere via `app.logger` (or the `useLogger()` hook in React).
+   * Access it anywhere via `app.logger` (in React: `useApplication().logger`).
    * @private
    */
   _createLogger(config) {
     if (!config) return null;
 
-    const baseSinks = [{ type: "console" }];
-    let persistence = null;
-    if (config.indexedDB) {
-      persistence = createIndexedDBSink({
-        dbName: config.indexedDB.dbName,
-        maxSize: config.indexedDB.maxSize,
-      });
-      baseSinks.push(persistence);
-    }
+    // A logging misconfiguration must degrade logging, not brick app startup.
+    // Any error building the logger falls back to no logger (or console-only for
+    // a bad persistence config) and warns, instead of throwing out of the
+    // Application constructor.
+    try {
+      const baseSinks = [{ type: "console" }];
+      let persistence = null;
+      if (config.indexedDB) {
+        try {
+          persistence = createIndexedDBSink({
+            dbName: config.indexedDB.dbName,
+            maxSize: config.indexedDB.maxSize,
+          });
+          baseSinks.push(persistence);
+        } catch (err) {
+          // e.g. an unparseable maxSize like "5 megs". Keep console logging.
+          console.warn(
+            `[radfish] logger IndexedDB persistence disabled — ${err.message}`,
+          );
+        }
+      }
 
-    const streams = {};
-    for (const [name, def] of Object.entries(config.streams || {})) {
-      streams[name] = {
-        level: def.level || "info",
-        // framework-provided sinks (console [+ IndexedDB]) plus any the dev adds
-        sinks: [...baseSinks, ...(def.sinks || [])],
-      };
-    }
+      const streams = {};
+      for (const [name, def] of Object.entries(config.streams || {})) {
+        streams[name] = {
+          level: def.level || "info",
+          // framework-provided sinks (console [+ IndexedDB]) plus any the dev adds
+          sinks: [...baseSinks, ...(def.sinks || [])],
+        };
+      }
 
-    const logger = new Logger({ streams, middleware: config.middleware });
-    // expose persistence helpers (loadLogs/clearLogs/...) for hydration; null if no IndexedDB
-    logger.persistence = persistence;
-    return logger;
+      const logger = new Logger({ streams, middleware: config.middleware });
+      // expose persistence helpers (loadLogs/clearLogs/...) for hydration; null if no IndexedDB
+      logger.persistence = persistence;
+      return logger;
+    } catch (err) {
+      console.warn(`[radfish] logger disabled due to invalid config — ${err.message}`);
+      return null;
+    }
   }
 
   /**

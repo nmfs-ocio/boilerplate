@@ -81,6 +81,20 @@ export const handled = ()    => ({ action: 'handled' });
 
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 
+// Coerce a stream level to a known level. An unknown/typo'd level (e.g.
+// "verbose" or wrong-case "Info") would make the level gate compare against
+// `undefined`, which is always false — silently disabling filtering so every
+// record passes (and, with persistence, burns the maxSize budget). Fall back to
+// "info" and warn instead of failing silently.
+function normalizeLevel(level, context) {
+  if (level == null) return 'info';
+  if (LEVELS[level] !== undefined) return level;
+  console.warn(
+    `[logger] unknown level "${level}"${context ? ` for ${context}` : ''} — falling back to "info". Valid levels: ${Object.keys(LEVELS).join(', ')}.`,
+  );
+  return 'info';
+}
+
 class StreamHandle {
   constructor(logger, name) {
     this._logger = logger;
@@ -90,7 +104,7 @@ class StreamHandle {
   info(msg, attrs)  { this._logger._write(this._name, 'info',  msg, attrs); }
   warn(msg, attrs)  { this._logger._write(this._name, 'warn',  msg, attrs); }
   error(msg, attrs) { this._logger._write(this._name, 'error', msg, attrs); }
-  setLevel(level)   { this._logger._streams.get(this._name).level = level; }
+  setLevel(level)   { this._logger._streams.get(this._name).level = normalizeLevel(level, `stream "${this._name}"`); }
   enable()  { this._logger._streams.get(this._name).enabled = true;  this._logger._emit('stream:enabled',  { name: this._name }); }
   disable() { this._logger._streams.get(this._name).enabled = false; this._logger._emit('stream:disabled', { name: this._name }); }
   isEnabled() { return this._logger._streams.get(this._name).enabled; }
@@ -123,7 +137,7 @@ export class Logger {
     }
     this._streams.set(name, {
       name,
-      level: def.level || 'info',
+      level: normalizeLevel(def.level, `stream "${name}"`),
       sinks: (def.sinks || []).map(resolveSink),
       retention: def.retention || {},
       enabled: true,
@@ -151,7 +165,9 @@ export class Logger {
   _finalizeRemoval(name, purge) {
     const s = this._streams.get(name);
     if (!s) return;
-    s.sinks.forEach((sink) => sink.close && sink.close({ purge }));
+    // Pass the stream name so a purging sink can scope deletion to THIS stream's
+    // records. Streams that share a sink (and its backing store) keep theirs.
+    s.sinks.forEach((sink) => sink.close && sink.close({ purge, stream: name }));
     this._streams.delete(name);
     this._emit('stream:removed', { name, purged: purge });
   }
@@ -235,27 +251,31 @@ export class Logger {
     }
   }
 
-  async _runPipeline(record) {
+  async _runPipeline(record, startIndex = 0) {
     let current = record;
-    for (const mw of this._middleware) {
+    // `resumeIndex` (the middleware AFTER the current one) is handed to the error
+    // pipeline so recover() can resume the normal chain here instead of skipping
+    // straight to the sinks — otherwise middleware like redaction gets bypassed.
+    for (let i = startIndex; i < this._middleware.length; i++) {
+      const mw = this._middleware[i];
       let result;
       try {
         result = await mw(current);
       } catch (err) {
-        return this._runErrorPipeline(err, current);
+        return this._runErrorPipeline(err, current, { resumeIndex: i + 1 });
       }
       if (!result || typeof result.action !== 'string') {
         return this._runErrorPipeline(
           new Error(`Middleware returned ${result === undefined ? 'undefined' : 'invalid value'} — every middleware must return next(), drop(), or forwardError()`),
           current,
-          { source: 'middleware-invalid-return' },
+          { source: 'middleware-invalid-return', resumeIndex: i + 1 },
         );
       }
       switch (result.action) {
         case 'next':  current = result.record || current; break;
         case 'drop':  this._emit('record:dropped', { stream: current.stream, reason: result.reason }); return;
-        case 'error': return this._runErrorPipeline(result.err, current, { source: 'forwarded' });
-        default:      return this._runErrorPipeline(new Error(`Unknown action "${result.action}"`), current, { source: 'middleware-invalid-return' });
+        case 'error': return this._runErrorPipeline(result.err, current, { source: 'forwarded', resumeIndex: i + 1 });
+        default:      return this._runErrorPipeline(new Error(`Unknown action "${result.action}"`), current, { source: 'middleware-invalid-return', resumeIndex: i + 1 });
       }
     }
     await this._dispatchToSinks(current);
@@ -287,7 +307,10 @@ export class Logger {
         return;
       }
       switch (result.action) {
-        case 'next':    return this._dispatchToSinks(record);
+        // recover(): resume the normal pipeline AFTER the middleware that failed
+        // so the remaining middleware (e.g. redaction) still runs. Falls back to
+        // dispatching to sinks when there's no resume point (end of chain).
+        case 'next':    return this._runPipeline(record, meta.resumeIndex ?? this._middleware.length);
         case 'rethrow': currentErr = result.err || currentErr; continue;
         case 'handled': return;
       }
@@ -319,7 +342,13 @@ function resolveSink(sinkOrConfig) {
     case 'console':
       return { write: (r) => console[r.level === 'debug' ? 'log' : r.level](r) };
     case 'indexedDB':
-      return { write: async (_r) => { /* stub */ }, close: () => {} };
+      // IndexedDB persistence is configured via the Application `logger.indexedDB`
+      // block (which builds a real sink), NOT a `{ type: 'indexedDB' }` sink
+      // entry. Fail loudly instead of returning a no-op that silently drops
+      // every record.
+      throw new Error(
+        'Configure IndexedDB persistence via the `logger.indexedDB` config block, not a { type: "indexedDB" } sink entry.',
+      );
     default:
       throw new Error(`Unknown sink type "${sinkOrConfig.type}"`);
   }

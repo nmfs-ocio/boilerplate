@@ -1,6 +1,6 @@
 {
   "name": "@nmfs-ocio/radfish",
-  "version": "1.1.8",
+  "version": "1.2.0-rc.0",
   "type": "module",
   "exports": {
     ".": "./index.js",
@@ -8,6 +8,14 @@
     "./logger": "./logger/index.js"
   },
   "main": "index.js",
+  "files": [
+    "index.js",
+    "logger",
+    "storage",
+    "on-device-storage",
+    "README.md",
+    "!**/*.spec.js"
+  ],
   "scripts": {
     "test": "vitest"
   },

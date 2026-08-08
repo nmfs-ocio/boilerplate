@@ -6,19 +6,14 @@
  * persisted data, so the app can hydrate previous-session logs on startup:
  *
  *   const sink = createIndexedDBSink({ dbName: "my-app-logs", maxSize: "5MB" });
- *   await sink.loadLogs();          // previous-session log records
- *   await sink.clearLogs();
- *   await sink.saveDiagnostic({ kind, stream, reason, timestamp });
- *   await sink.loadDiagnostics();   // metadata-only logger events
+ *   await sink.loadLogs();                   // previous-session log records
+ *   await sink.clearLogs();                  // clear ALL streams' logs
+ *   await sink.clearLogs({ stream: "app" }); // clear only ONE stream's logs
  *
- * Two object stores per database:
- *   - "logs"        — full log records that reached the sinks.
- *   - "diagnostics" — the logger's OWN events (drops/errors/lifecycle) as
- *                     METADATA ONLY ({ kind, stream, reason, timestamp }). A
- *                     dropped/errored record's payload is never stored, so a
- *                     redacted secret can't be re-persisted here.
+ * One object store per database ("logs") holding the full log records that
+ * reached the sink.
  *
- * Each store is auto-trimmed to the `maxSize` storage budget (oldest records
+ * The store is auto-trimmed to the `maxSize` storage budget (oldest records
  * evicted first) so it can't grow without bound. `maxSize` is human-friendly:
  * a string like "5MB" / "500KB" / "1GB", or a raw number of bytes. Units are
  * binary (1KB = 1024 bytes). Instance-scoped by `dbName`, so multiple databases
@@ -26,9 +21,8 @@
  */
 
 const LOGS = "logs";
-const DIAGNOSTICS = "diagnostics";
 const VERSION = 1;
-const DEFAULT_MAX_SIZE = "5MB"; // per store
+const DEFAULT_MAX_SIZE = "5MB";
 
 const hasIDB = () => typeof indexedDB !== "undefined";
 
@@ -64,11 +58,9 @@ function openDB(dbName) {
     const req = indexedDB.open(dbName, VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
-      for (const name of [LOGS, DIAGNOSTICS]) {
-        if (!db.objectStoreNames.contains(name)) {
-          const store = db.createObjectStore(name, { keyPath: "_id", autoIncrement: true });
-          store.createIndex("timestamp", "timestamp");
-        }
+      if (!db.objectStoreNames.contains(LOGS)) {
+        const store = db.createObjectStore(LOGS, { keyPath: "_id", autoIncrement: true });
+        store.createIndex("timestamp", "timestamp");
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -112,14 +104,13 @@ export function createIndexedDBSink({ dbName = "radfish-logs", maxSize = DEFAULT
   let dbPromise;
   const db = () => (dbPromise ||= openDB(dbName));
 
-  // Running byte total + record count per store, seeded once from disk on first
-  // use and then maintained incrementally. This avoids re-reading and
+  // Running byte total + record count for the store, seeded once from disk on
+  // first use and then maintained incrementally. This avoids re-reading and
   // re-serializing the ENTIRE store on every write (which was O(n) per write →
   // O(n²) over a session). The common write path now touches only the new
   // record, plus any oldest rows it has to evict.
   const stats = {
     [LOGS]: { bytes: 0, count: 0, seeded: false },
-    [DIAGNOSTICS]: { bytes: 0, count: 0, seeded: false },
   };
 
   async function seed(database, storeName) {
@@ -154,19 +145,67 @@ export function createIndexedDBSink({ dbName = "radfish-logs", maxSize = DEFAULT
 
     const evictTx = database.transaction(storeName, "readwrite");
     const store = evictTx.objectStore(storeName);
+    // Drive the stop condition off a PROJECTED total tracked locally, and apply
+    // the change to the shared stats only AFTER the transaction commits. If
+    // evictTx aborts (e.g. QuotaExceeded, tab closed mid-tx), IndexedDB rolls
+    // back the deletes; the shared counter must not drift, since a drifted
+    // (under-counted) counter silently disables eviction and lets the store
+    // grow past maxSize — the exact thing maxSize exists to prevent.
+    let projectedBytes = s.bytes;
+    let projectedCount = s.count;
+    let removedBytes = 0;
+    let removedCount = 0;
     await new Promise((resolve, reject) => {
       const req = store.openCursor(); // ascending key order = oldest first
       req.onsuccess = () => {
         const cursor = req.result;
-        if (!cursor || s.bytes <= maxBytes || s.count <= 1) return resolve();
+        if (!cursor || projectedBytes <= maxBytes || projectedCount <= 1) return resolve();
         cursor.delete();
-        s.bytes -= accountedSize(cursor.value);
-        s.count -= 1;
+        const size = accountedSize(cursor.value);
+        projectedBytes -= size;
+        projectedCount -= 1;
+        removedBytes += size;
+        removedCount += 1;
         cursor.continue();
       };
       req.onerror = () => reject(req.error);
     });
     await txDone(evictTx);
+    s.bytes -= removedBytes;
+    s.count -= removedCount;
+  }
+
+  // Delete every record in `storeName` matching `predicate`, keeping the running
+  // byte/count stats in sync. Stats are adjusted only AFTER the transaction
+  // commits, so an aborted delete can't leave the counter drifted (which would
+  // silently disable eviction). Used for scoped clears (e.g. one stream's logs).
+  async function deleteWhere(storeName, predicate) {
+    const database = await db();
+    await seed(database, storeName);
+
+    const tx = database.transaction(storeName, "readwrite");
+    const store = tx.objectStore(storeName);
+    let removedBytes = 0;
+    let removedCount = 0;
+    await new Promise((resolve, reject) => {
+      const req = store.openCursor();
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return resolve();
+        if (predicate(cursor.value)) {
+          cursor.delete();
+          removedBytes += accountedSize(cursor.value);
+          removedCount += 1;
+        }
+        cursor.continue();
+      };
+      req.onerror = () => reject(req.error);
+    });
+    await txDone(tx);
+
+    const s = stats[storeName];
+    s.bytes -= removedBytes;
+    s.count -= removedCount;
   }
 
   return {
@@ -178,10 +217,16 @@ export function createIndexedDBSink({ dbName = "radfish-logs", maxSize = DEFAULT
       const { _fromStorage, _id, ...clean } = record; // strip UI/key-only fields
       await addTo(LOGS, clean);
     },
-    close: async ({ purge } = {}) => {
-      if (purge && hasIDB()) {
+    close: async ({ purge, stream } = {}) => {
+      if (!purge || !hasIDB()) return;
+      if (stream === undefined) {
+        // Unscoped purge: clear the whole store.
         await clearStore(await db(), LOGS);
         resetStats(LOGS);
+      } else {
+        // Scoped purge: delete only THIS stream's records so other streams that
+        // share the same sink (and backing store) keep their logs.
+        await deleteWhere(LOGS, (r) => r.stream === stream);
       }
     },
     // Accounted bytes currently stored in the logs store. Uses the sink's own
@@ -196,22 +241,14 @@ export function createIndexedDBSink({ dbName = "radfish-logs", maxSize = DEFAULT
     },
     // --- persistence helpers (for hydration / clearing from the app) ---
     loadLogs: async () => (hasIDB() ? getAllFrom(await db(), LOGS) : []),
-    clearLogs: async () => {
-      if (hasIDB()) {
+    // Clear all logs, or pass { stream } to clear just one stream's logs.
+    clearLogs: async ({ stream } = {}) => {
+      if (!hasIDB()) return;
+      if (stream === undefined) {
         await clearStore(await db(), LOGS);
         resetStats(LOGS);
-      }
-    },
-    saveDiagnostic: async (meta) => {
-      if (!hasIDB()) return;
-      const { kind, stream, reason, timestamp } = meta; // metadata only — never a payload
-      await addTo(DIAGNOSTICS, { kind, stream, reason: reason ?? null, timestamp });
-    },
-    loadDiagnostics: async () => (hasIDB() ? getAllFrom(await db(), DIAGNOSTICS) : []),
-    clearDiagnostics: async () => {
-      if (hasIDB()) {
-        await clearStore(await db(), DIAGNOSTICS);
-        resetStats(DIAGNOSTICS);
+      } else {
+        await deleteWhere(LOGS, (r) => r.stream === stream);
       }
     },
   };

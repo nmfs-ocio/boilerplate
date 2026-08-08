@@ -2,6 +2,7 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect } from 'vitest';
 import { createIndexedDBSink } from './indexedDBSink.js';
+import { Logger } from './Logger.js';
 
 /**
  * Tests for the IndexedDB sink's maxSize budget + eviction.
@@ -120,4 +121,98 @@ describe('indexedDBSink maxSize parsing/validation', () => {
       expect(() => createIndexedDBSink({ dbName: uniqueDbName('bad'), maxSize: value })).toThrow(/maxSize/);
     },
   );
+});
+
+describe('indexedDBSink eviction stats (counter must stay in sync)', () => {
+  const rec = (seq) => ({
+    timestamp: 1000 + seq,
+    stream: 'app',
+    level: 'info',
+    message: 'catch report submitted',
+    attributes: { seq },
+  });
+
+  it('keeps evicting across many writes without the counter drifting (stays within budget)', async () => {
+    const sink = createIndexedDBSink({ dbName: uniqueDbName('drift'), maxSize: '1KB' });
+    // Sustained writes well past the budget in several bursts; if the running
+    // counter drifted below true size, eviction would stop and the store would
+    // blow past 1KB.
+    for (let i = 0; i < 200; i++) await sink.write(rec(i));
+    const stored = await sink.loadLogs();
+
+    expect(accountedBytes(stored)).toBeLessThanOrEqual(1024);
+    expect(stored.map((r) => r.attributes.seq)).toContain(199); // newest kept
+  });
+});
+
+describe('indexedDBSink per-stream purge (shared sink must not wipe all streams)', () => {
+  const rec = (stream, seq) => ({
+    timestamp: 1000 + seq,
+    stream,
+    level: 'info',
+    message: 'm',
+    attributes: { seq },
+  });
+
+  it('close({ purge, stream }) deletes only that stream, leaving others intact', async () => {
+    const sink = createIndexedDBSink({ dbName: uniqueDbName('scoped-close'), maxSize: '5MB' });
+    await sink.write(rec('app', 1));
+    await sink.write(rec('system', 2));
+    await sink.write(rec('app', 3));
+
+    await sink.close({ purge: true, stream: 'app' });
+
+    expect((await sink.loadLogs()).map((r) => r.stream)).toEqual(['system']);
+  });
+
+  it('close({ purge }) with no stream still clears everything (back-compat)', async () => {
+    const sink = createIndexedDBSink({ dbName: uniqueDbName('purge-all'), maxSize: '5MB' });
+    await sink.write(rec('app', 1));
+    await sink.write(rec('system', 2));
+
+    await sink.close({ purge: true });
+
+    expect(await sink.loadLogs()).toHaveLength(0);
+  });
+
+  it('clearLogs({ stream }) removes exactly the target stream records', async () => {
+    const sink = createIndexedDBSink({ dbName: uniqueDbName('scoped-clear'), maxSize: '5MB' });
+    for (let i = 0; i < 20; i++) await sink.write(rec('app', i));
+    for (let i = 0; i < 20; i++) await sink.write(rec('system', i));
+
+    await sink.clearLogs({ stream: 'app' });
+
+    const remaining = await sink.loadLogs();
+    expect(remaining).toHaveLength(20);
+    expect(remaining.every((r) => r.stream === 'system')).toBe(true);
+  });
+
+  it('clearLogs() with no args still clears every stream (back-compat)', async () => {
+    const sink = createIndexedDBSink({ dbName: uniqueDbName('clear-all'), maxSize: '5MB' });
+    await sink.write(rec('app', 1));
+    await sink.write(rec('system', 2));
+
+    await sink.clearLogs();
+
+    expect(await sink.loadLogs()).toHaveLength(0);
+  });
+
+  it('Logger.removeStream(name, { purge:true }) only wipes that stream when streams share a sink', async () => {
+    const sink = createIndexedDBSink({ dbName: uniqueDbName('logger-purge'), maxSize: '5MB' });
+    const logger = new Logger({
+      streams: {
+        app: { level: 'info', sinks: [sink] },
+        system: { level: 'info', sinks: [sink] },
+      },
+    });
+    logger.stream('app').info('app msg');
+    logger.stream('system').info('system msg');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(await sink.loadLogs()).toHaveLength(2);
+
+    logger.removeStream('app', { purge: true });
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect((await sink.loadLogs()).map((r) => r.stream)).toEqual(['system']);
+  });
 });

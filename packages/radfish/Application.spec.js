@@ -1,3 +1,4 @@
+import { vi } from 'vitest';
 import { Application, IndexedDBMethod, LocalStorageMethod } from './index';
 
 describe('Application',  () => {
@@ -64,6 +65,39 @@ describe('Application',  () => {
         }
       )
       expect(localStorageApplication.storage).toBeInstanceOf(LocalStorageMethod);
+    });
+  });
+
+  describe('logger config (a bad logger config must not brick app startup)', () => {
+    it('does not throw on an unparseable maxSize; degrades to console-only logging', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      let app;
+
+      expect(() => {
+        app = new Application({
+          logger: {
+            streams: { app: { level: 'info' } },
+            indexedDB: { dbName: 'bad', maxSize: '5 megs' }, // unparseable
+          },
+        });
+      }).not.toThrow();
+
+      // logger still works for console output, but persistence is disabled
+      expect(app.logger).toBeTruthy();
+      expect(app.logger.persistence).toBeNull();
+      expect(warn).toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it('builds a logger with persistence when the indexedDB config is valid', () => {
+      const app = new Application({
+        logger: {
+          streams: { app: { level: 'info' } },
+          indexedDB: { dbName: 'ok', maxSize: '5MB' },
+        },
+      });
+      expect(app.logger).toBeTruthy();
+      expect(app.logger.persistence).toBeTruthy();
     });
   });
 });
