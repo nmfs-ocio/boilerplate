@@ -68,7 +68,7 @@ describe('Application',  () => {
     });
   });
 
-  describe('logger config (bug #2: a bad logger config must not brick app startup)', () => {
+  describe('logger config (a bad logger config must not brick app startup)', () => {
     it('does not throw on an unparseable maxSize; degrades to console-only logging', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       let app;

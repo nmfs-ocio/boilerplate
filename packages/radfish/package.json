@@ -8,6 +8,14 @@
     "./logger": "./logger/index.js"
   },
   "main": "index.js",
+  "files": [
+    "index.js",
+    "logger",
+    "storage",
+    "on-device-storage",
+    "README.md",
+    "!**/*.spec.js"
+  ],
   "scripts": {
     "test": "vitest"
   },

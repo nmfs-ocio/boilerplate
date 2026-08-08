@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Logger, next, drop, forwardError, recover } from './Logger.js';
 
 /**
@@ -84,7 +84,7 @@ describe('Logger middleware', () => {
   });
 });
 
-describe('Logger error middleware (bug #3: recover() must not bypass later middleware)', () => {
+describe('Logger error middleware (recover() must not bypass later middleware)', () => {
   it('recover() resumes the normal pipeline so downstream redaction still runs', async () => {
     const sink = captureSink();
     const logger = new Logger({
@@ -118,6 +118,43 @@ describe('Logger error middleware (bug #3: recover() must not bypass later middl
     await flush();
 
     expect(sink.records.map((r) => r.message)).toEqual(['my [REDACTED] token']);
+  });
+});
+
+describe('Logger level validation (unknown level must not disable filtering)', () => {
+  it('coerces an unknown configured level to "info" so filtering still works', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sink = captureSink();
+    const logger = new Logger({ streams: { app: { level: 'verbose', sinks: [sink] } } });
+
+    logger.stream('app').debug('should be filtered'); // below info -> dropped
+    logger.stream('app').info('kept');
+    await flush();
+
+    expect(sink.records.map((r) => r.message)).toEqual(['kept']);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('setLevel() with an unknown level falls back to "info"', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sink = captureSink();
+    const logger = new Logger({ streams: { app: { level: 'error', sinks: [sink] } } });
+
+    logger.stream('app').setLevel('Info'); // wrong case -> coerced to 'info'
+    logger.stream('app').debug('filtered');
+    logger.stream('app').info('kept');
+    await flush();
+
+    expect(sink.records.map((r) => r.message)).toEqual(['kept']);
+    warn.mockRestore();
+  });
+});
+
+describe('resolveSink ({ type: "indexedDB" } must fail loudly, not drop records)', () => {
+  it('throws instead of returning a silent no-op for { type: "indexedDB" }', () => {
+    expect(() => new Logger({ streams: { app: { sinks: [{ type: 'indexedDB' }] } } }))
+      .toThrow(/logger\.indexedDB/);
   });
 });
 

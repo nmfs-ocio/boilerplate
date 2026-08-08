@@ -123,7 +123,29 @@ describe('indexedDBSink maxSize parsing/validation', () => {
   );
 });
 
-describe('indexedDBSink per-stream purge (bug #1: shared sink must not wipe all streams)', () => {
+describe('indexedDBSink eviction stats (counter must stay in sync)', () => {
+  const rec = (seq) => ({
+    timestamp: 1000 + seq,
+    stream: 'app',
+    level: 'info',
+    message: 'catch report submitted',
+    attributes: { seq },
+  });
+
+  it('keeps evicting across many writes without the counter drifting (stays within budget)', async () => {
+    const sink = createIndexedDBSink({ dbName: uniqueDbName('drift'), maxSize: '1KB' });
+    // Sustained writes well past the budget in several bursts; if the running
+    // counter drifted below true size, eviction would stop and the store would
+    // blow past 1KB.
+    for (let i = 0; i < 200; i++) await sink.write(rec(i));
+    const stored = await sink.loadLogs();
+
+    expect(accountedBytes(stored)).toBeLessThanOrEqual(1024);
+    expect(stored.map((r) => r.attributes.seq)).toContain(199); // newest kept
+  });
+});
+
+describe('indexedDBSink per-stream purge (shared sink must not wipe all streams)', () => {
   const rec = (stream, seq) => ({
     timestamp: 1000 + seq,
     stream,
