@@ -151,7 +151,9 @@ export class Logger {
   _finalizeRemoval(name, purge) {
     const s = this._streams.get(name);
     if (!s) return;
-    s.sinks.forEach((sink) => sink.close && sink.close({ purge }));
+    // Pass the stream name so a purging sink can scope deletion to THIS stream's
+    // records. Streams that share a sink (and its backing store) keep theirs.
+    s.sinks.forEach((sink) => sink.close && sink.close({ purge, stream: name }));
     this._streams.delete(name);
     this._emit('stream:removed', { name, purged: purge });
   }
@@ -235,27 +237,31 @@ export class Logger {
     }
   }
 
-  async _runPipeline(record) {
+  async _runPipeline(record, startIndex = 0) {
     let current = record;
-    for (const mw of this._middleware) {
+    // `resumeIndex` (the middleware AFTER the current one) is handed to the error
+    // pipeline so recover() can resume the normal chain here instead of skipping
+    // straight to the sinks — otherwise middleware like redaction gets bypassed.
+    for (let i = startIndex; i < this._middleware.length; i++) {
+      const mw = this._middleware[i];
       let result;
       try {
         result = await mw(current);
       } catch (err) {
-        return this._runErrorPipeline(err, current);
+        return this._runErrorPipeline(err, current, { resumeIndex: i + 1 });
       }
       if (!result || typeof result.action !== 'string') {
         return this._runErrorPipeline(
           new Error(`Middleware returned ${result === undefined ? 'undefined' : 'invalid value'} — every middleware must return next(), drop(), or forwardError()`),
           current,
-          { source: 'middleware-invalid-return' },
+          { source: 'middleware-invalid-return', resumeIndex: i + 1 },
         );
       }
       switch (result.action) {
         case 'next':  current = result.record || current; break;
         case 'drop':  this._emit('record:dropped', { stream: current.stream, reason: result.reason }); return;
-        case 'error': return this._runErrorPipeline(result.err, current, { source: 'forwarded' });
-        default:      return this._runErrorPipeline(new Error(`Unknown action "${result.action}"`), current, { source: 'middleware-invalid-return' });
+        case 'error': return this._runErrorPipeline(result.err, current, { source: 'forwarded', resumeIndex: i + 1 });
+        default:      return this._runErrorPipeline(new Error(`Unknown action "${result.action}"`), current, { source: 'middleware-invalid-return', resumeIndex: i + 1 });
       }
     }
     await this._dispatchToSinks(current);
@@ -287,7 +293,10 @@ export class Logger {
         return;
       }
       switch (result.action) {
-        case 'next':    return this._dispatchToSinks(record);
+        // recover(): resume the normal pipeline AFTER the middleware that failed
+        // so the remaining middleware (e.g. redaction) still runs. Falls back to
+        // dispatching to sinks when there's no resume point (end of chain).
+        case 'next':    return this._runPipeline(record, meta.resumeIndex ?? this._middleware.length);
         case 'rethrow': currentErr = result.err || currentErr; continue;
         case 'handled': return;
       }

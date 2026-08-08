@@ -6,10 +6,11 @@
  * persisted data, so the app can hydrate previous-session logs on startup:
  *
  *   const sink = createIndexedDBSink({ dbName: "my-app-logs", maxSize: "5MB" });
- *   await sink.loadLogs();          // previous-session log records
- *   await sink.clearLogs();
+ *   await sink.loadLogs();              // previous-session log records
+ *   await sink.clearLogs();             // clear ALL streams' logs
+ *   await sink.clearLogs({ stream: "app" }); // clear only ONE stream's logs
  *   await sink.saveDiagnostic({ kind, stream, reason, timestamp });
- *   await sink.loadDiagnostics();   // metadata-only logger events
+ *   await sink.loadDiagnostics();       // metadata-only logger events
  *
  * Two object stores per database:
  *   - "logs"        — full log records that reached the sinks.
@@ -169,6 +170,39 @@ export function createIndexedDBSink({ dbName = "radfish-logs", maxSize = DEFAULT
     await txDone(evictTx);
   }
 
+  // Delete every record in `storeName` matching `predicate`, keeping the running
+  // byte/count stats in sync. Stats are adjusted only AFTER the transaction
+  // commits, so an aborted delete can't leave the counter drifted (which would
+  // silently disable eviction). Used for scoped clears (e.g. one stream's logs).
+  async function deleteWhere(storeName, predicate) {
+    const database = await db();
+    await seed(database, storeName);
+
+    const tx = database.transaction(storeName, "readwrite");
+    const store = tx.objectStore(storeName);
+    let removedBytes = 0;
+    let removedCount = 0;
+    await new Promise((resolve, reject) => {
+      const req = store.openCursor();
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return resolve();
+        if (predicate(cursor.value)) {
+          cursor.delete();
+          removedBytes += accountedSize(cursor.value);
+          removedCount += 1;
+        }
+        cursor.continue();
+      };
+      req.onerror = () => reject(req.error);
+    });
+    await txDone(tx);
+
+    const s = stats[storeName];
+    s.bytes -= removedBytes;
+    s.count -= removedCount;
+  }
+
   return {
     dbName,
     // --- Logger sink contract ---
@@ -177,18 +211,28 @@ export function createIndexedDBSink({ dbName = "radfish-logs", maxSize = DEFAULT
       const { _fromStorage, _id, ...clean } = record; // strip UI/key-only fields
       await addTo(LOGS, clean);
     },
-    close: async ({ purge } = {}) => {
-      if (purge && hasIDB()) {
+    close: async ({ purge, stream } = {}) => {
+      if (!purge || !hasIDB()) return;
+      if (stream === undefined) {
+        // Unscoped purge: clear the whole store.
         await clearStore(await db(), LOGS);
         resetStats(LOGS);
+      } else {
+        // Scoped purge: delete only THIS stream's records so other streams that
+        // share the same sink (and backing store) keep their logs.
+        await deleteWhere(LOGS, (r) => r.stream === stream);
       }
     },
     // --- persistence helpers (for hydration / clearing from the app) ---
     loadLogs: async () => (hasIDB() ? getAllFrom(await db(), LOGS) : []),
-    clearLogs: async () => {
-      if (hasIDB()) {
+    // Clear all logs, or pass { stream } to clear just one stream's logs.
+    clearLogs: async ({ stream } = {}) => {
+      if (!hasIDB()) return;
+      if (stream === undefined) {
         await clearStore(await db(), LOGS);
         resetStats(LOGS);
+      } else {
+        await deleteWhere(LOGS, (r) => r.stream === stream);
       }
     },
     saveDiagnostic: async (meta) => {

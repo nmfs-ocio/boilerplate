@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { Logger, next, drop } from './Logger.js';
+import { Logger, next, drop, forwardError, recover } from './Logger.js';
 
 /**
  * Tests for the core Logger: level filtering, the return-based middleware
@@ -81,6 +81,43 @@ describe('Logger middleware', () => {
     await flush();
 
     expect(sink.records[0].message).toBe('HELLO');
+  });
+});
+
+describe('Logger error middleware (bug #3: recover() must not bypass later middleware)', () => {
+  it('recover() resumes the normal pipeline so downstream redaction still runs', async () => {
+    const sink = captureSink();
+    const logger = new Logger({
+      streams: { app: { level: 'info', sinks: [sink] } },
+      middleware: [
+        () => { throw new Error('enrich failed'); },                              // #1 throws
+        (r) => next({ ...r, message: r.message.replace('secret', '[REDACTED]') }), // #2 redacts
+      ],
+    });
+    logger.useError(() => recover());
+
+    logger.stream('app').info('my secret token');
+    await flush();
+
+    // redaction (mw #2) must still run even though mw #1 threw and was recovered
+    expect(sink.records.map((r) => r.message)).toEqual(['my [REDACTED] token']);
+  });
+
+  it('recover() from a forwarded error also resumes after the forwarding middleware', async () => {
+    const sink = captureSink();
+    const logger = new Logger({
+      streams: { app: { level: 'info', sinks: [sink] } },
+      middleware: [
+        (r) => forwardError(new Error('boom')),                                    // #1 forwards
+        (r) => next({ ...r, message: r.message.replace('secret', '[REDACTED]') }), // #2 redacts
+      ],
+    });
+    logger.useError(() => recover());
+
+    logger.stream('app').info('my secret token');
+    await flush();
+
+    expect(sink.records.map((r) => r.message)).toEqual(['my [REDACTED] token']);
   });
 });
 
