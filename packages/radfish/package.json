@@ -12,7 +12,9 @@
     "index.js",
     "logger",
     "storage",
+    "storage-manager",
     "on-device-storage",
+    "utils",
     "README.md",
     "!**/*.spec.js"
   ],
