@@ -4,9 +4,20 @@
   "type": "module",
   "exports": {
     ".": "./index.js",
-    "./storage": "./storage/index.js"
+    "./storage": "./storage/index.js",
+    "./logger": "./logger/index.js"
   },
   "main": "index.js",
+  "files": [
+    "index.js",
+    "logger",
+    "storage",
+    "storage-manager",
+    "on-device-storage",
+    "utils",
+    "README.md",
+    "!**/*.spec.js"
+  ],
   "scripts": {
     "test": "vitest"
   },

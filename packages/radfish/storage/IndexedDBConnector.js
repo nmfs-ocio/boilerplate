@@ -1,6 +1,7 @@
 import Dexie from "dexie";
 import Connector from "./Connector.js";
 import Engine from "./Engine.js";
+import { byteSize } from "../utils/byteSize.js";
 
 /**
  * IndexedDBEngine - A storage engine that uses IndexedDB (via Dexie) for persistence
@@ -356,12 +357,41 @@ class IndexedDBConnector extends Connector {
   async addCollection(schema) {
     // Add the schema to the engine (this now returns a Promise)
     await this.engine.addSchema(schema.name, schema);
-    
+
     // Call the parent method to register the collection
     super.addCollection(schema);
-    
+
     // Return the created collection
     return this.collections[schema.name];
+  }
+
+  /**
+   * Total bytes currently stored in this connector's database, measured by
+   * summing the serialized (UTF-8 JSON) size of every record across all tables.
+   * RADFish measures this itself because the browser provides no per-database
+   * byte breakdown cross-browser.
+   *
+   * Rows are streamed one at a time (cursor) rather than materialized via
+   * toArray(), so peak memory stays flat regardless of table size. It is still
+   * O(n) CPU, so it's an on-demand measurement — call it when you need a number,
+   * not in a tight loop.
+   *
+   * Returns 0 for an uninitialized connector, and null when the database exists
+   * but isn't currently open (e.g. mid schema-change) — null means "not
+   * measurable right now", which callers must distinguish from "empty".
+   * @returns {Promise<number|null>}
+   */
+  async usage() {
+    const db = this.engine?.db;
+    if (!db) return 0;
+    if (typeof db.isOpen === "function" && !db.isOpen()) return null;
+
+    let total = 0;
+    for (const table of db.tables) {
+      // Stream via cursor so a large table is never held in memory just to size it.
+      await table.each((row) => { total += byteSize(row); });
+    }
+    return total;
   }
 }
 
