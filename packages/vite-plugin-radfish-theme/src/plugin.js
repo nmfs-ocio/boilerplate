@@ -147,7 +147,11 @@ export function radFishThemePlugin(options = {}) {
           console.log("[radfish-theme] Loaded theme from:", themeDirPath);
         }
       } else {
-        console.warn(`[radfish-theme] Theme "${themeName}" not found at ${themeDirPath}`);
+        console.warn(
+          `[radfish-theme] Theme "${themeName}" not found at ${themeDirPath}. ` +
+            `Skipping theme CSS/icon injection. Copy the themes/ directory from the ` +
+            `RADFish template (expected themes/${themeName}/) to enable theming.`,
+        );
       }
 
       // Return define values for import.meta.env.RADFISH_*
@@ -199,25 +203,33 @@ export function radFishThemePlugin(options = {}) {
     transformIndexHtml(html) {
       if (!ctx.config) return html;
 
-      // Generate CSS variables from all colors in config
-      // Convert camelCase keys to kebab-case for CSS variable names
-      const colorVariables = Object.entries(ctx.config.colors)
-        .map(([key, value]) => {
-          const kebabKey = key.replace(/([A-Z])/g, "-$1").toLowerCase();
-          return `        --radfish-color-${kebabKey}: ${value};`;
-        })
-        .join("\n");
+      let result = html;
 
-      // Inject theme CSS via link tags (all pre-compiled by plugin)
-      // This allows developers to not manually include CSS imports in their code
-      // Uses /radfish-theme/ path which is served by middleware in dev and copied to dist in build
-      const cssImports = `
+      // Only inject theme CSS + icon links when a theme directory actually
+      // resolved. Without one, the plugin never compiles/serves/copies these
+      // files, so injecting references to /radfish-theme/*.css and /icons/*
+      // would produce 404s in dev and prod. (config() logs a warning telling
+      // the developer to add themes/<name>/.)
+      if (ctx.themeDir) {
+        // Generate CSS variables from all colors in config
+        // Convert camelCase keys to kebab-case for CSS variable names
+        const colorVariables = Object.entries(ctx.config.colors)
+          .map(([key, value]) => {
+            const kebabKey = key.replace(/([A-Z])/g, "-$1").toLowerCase();
+            return `        --radfish-color-${kebabKey}: ${value};`;
+          })
+          .join("\n");
+
+        // Inject theme CSS via link tags (all pre-compiled by plugin)
+        // This allows developers to not manually include CSS imports in their code
+        // Uses /radfish-theme/ path which is served by middleware in dev and copied to dist in build
+        const cssImports = `
     <!-- RADFish Theme CSS (auto-injected by plugin) -->
     <link rel="stylesheet" href="/radfish-theme/uswds-precompiled.css">
     <link rel="stylesheet" href="/radfish-theme/theme.css">`;
 
-      // Generate CSS variables from config
-      const cssVariables = `
+        // Generate CSS variables from config
+        const cssVariables = `
     <style id="radfish-theme-variables">
       :root {
 ${colorVariables}
@@ -225,8 +237,21 @@ ${colorVariables}
       }
     </style>`;
 
-      return html
-        .replace("</head>", `${cssImports}\n${cssVariables}\n  </head>`)
+        result = result
+          .replace("</head>", `${cssImports}\n${cssVariables}\n  </head>`)
+          .replace(
+            /<link rel="icon" type="image\/x-icon" href=".*?" \/>/,
+            `<link rel="icon" type="image/x-icon" href="${ctx.config.icons.favicon}" />`,
+          )
+          .replace(
+            /<link rel="apple-touch-icon" href=".*?" \/>/,
+            `<link rel="apple-touch-icon" href="${ctx.config.icons.appleTouchIcon}" />`,
+          );
+      }
+
+      // Title/meta transforms use inline config values (no external files), so
+      // they are safe to apply whether or not a theme directory exists.
+      return result
         .replace(
           /<title>.*?<\/title>/,
           `<title>${ctx.config.shortName}</title>`,
@@ -238,14 +263,6 @@ ${colorVariables}
         .replace(
           /<meta name="description" content=".*?" \/>/,
           `<meta name="description" content="${ctx.config.description}" />`,
-        )
-        .replace(
-          /<link rel="icon" type="image\/x-icon" href=".*?" \/>/,
-          `<link rel="icon" type="image/x-icon" href="${ctx.config.icons.favicon}" />`,
-        )
-        .replace(
-          /<link rel="apple-touch-icon" href=".*?" \/>/,
-          `<link rel="apple-touch-icon" href="${ctx.config.icons.appleTouchIcon}" />`,
         );
     },
 
