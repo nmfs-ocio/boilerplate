@@ -29,6 +29,19 @@ import { configureServer } from "./server.js";
 import { closeBundle } from "./build.js";
 
 /**
+ * Prefix a root-absolute asset path with Vite's `base` so injected URLs resolve
+ * under a subpath deploy. Tolerates a missing leading slash; leaves relative
+ * ("./") and absolute-URL bases untouched.
+ */
+function withBase(base, assetPath) {
+  let b = base || "/";
+  if (!b.startsWith("/") && !b.startsWith("./") && !/^[a-z]+:\/\//i.test(b)) {
+    b = "/" + b;
+  }
+  return `${b.replace(/\/$/, "")}${assetPath}`;
+}
+
+/**
  * Main Vite plugin for RADFish theming
  * @param {Object} options - Plugin options (theme, name, shortName, description, etc.)
  */
@@ -169,9 +182,11 @@ export function radFishThemePlugin(options = {}) {
           "import.meta.env.RADFISH_DESCRIPTION": JSON.stringify(
             ctx.config.description,
           ),
-          "import.meta.env.RADFISH_LOGO": JSON.stringify(ctx.config.icons.logo),
+          "import.meta.env.RADFISH_LOGO": JSON.stringify(
+            withBase(ctx.base, ctx.config.icons.logo),
+          ),
           "import.meta.env.RADFISH_FAVICON": JSON.stringify(
-            ctx.config.icons.favicon,
+            withBase(ctx.base, ctx.config.icons.favicon),
           ),
           "import.meta.env.RADFISH_PRIMARY_COLOR": JSON.stringify(
             ctx.config.colors.primary,
@@ -205,11 +220,8 @@ export function radFishThemePlugin(options = {}) {
 
       let result = html;
 
-      // Only inject theme CSS + icon links when a theme directory actually
-      // resolved. Without one, the plugin never compiles/serves/copies these
-      // files, so injecting references to /radfish-theme/*.css and /icons/*
-      // would produce 404s in dev and prod. (config() logs a warning telling
-      // the developer to add themes/<name>/.)
+      // Only inject theme CSS/icon links when a theme resolved; otherwise the
+      // files are never built and the references would 404.
       if (ctx.themeDir) {
         // Generate CSS variables from all colors in config
         // Convert camelCase keys to kebab-case for CSS variable names
@@ -225,8 +237,8 @@ export function radFishThemePlugin(options = {}) {
         // Uses /radfish-theme/ path which is served by middleware in dev and copied to dist in build
         const cssImports = `
     <!-- RADFish Theme CSS (auto-injected by plugin) -->
-    <link rel="stylesheet" href="/radfish-theme/uswds-precompiled.css">
-    <link rel="stylesheet" href="/radfish-theme/theme.css">`;
+    <link rel="stylesheet" href="${withBase(ctx.base, "/radfish-theme/uswds-precompiled.css")}">
+    <link rel="stylesheet" href="${withBase(ctx.base, "/radfish-theme/theme.css")}">`;
 
         // Generate CSS variables from config
         const cssVariables = `
@@ -241,11 +253,11 @@ ${colorVariables}
           .replace("</head>", `${cssImports}\n${cssVariables}\n  </head>`)
           .replace(
             /<link rel="icon" type="image\/x-icon" href=".*?" \/>/,
-            `<link rel="icon" type="image/x-icon" href="${ctx.config.icons.favicon}" />`,
+            `<link rel="icon" type="image/x-icon" href="${withBase(ctx.base, ctx.config.icons.favicon)}" />`,
           )
           .replace(
             /<link rel="apple-touch-icon" href=".*?" \/>/,
-            `<link rel="apple-touch-icon" href="${ctx.config.icons.appleTouchIcon}" />`,
+            `<link rel="apple-touch-icon" href="${withBase(ctx.base, ctx.config.icons.appleTouchIcon)}" />`,
           );
       }
 
